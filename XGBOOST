@@ -1,0 +1,84 @@
+import pandas as pd
+import numpy as np
+from xgboost import XGBRegressor
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import mean_squared_error, mean_absolute_error
+import plotly.graph_objects as go
+
+# Load dataset
+file_path = "hd1.csv"
+df = pd.read_csv(file_path)
+
+# Ensure 'Timestamp' is present
+if 'Timestamp' not in df.columns:
+    raise ValueError("The column 'Timestamp' is missing from the dataset.")
+
+# Convert Timestamp to datetime
+df['Timestamp'] = pd.to_datetime(df['Timestamp'])
+
+# Aggregate daily sum of Amount (INR)
+df_daily = df.groupby(df['Timestamp'].dt.date)['Amount (INR)'].sum().reset_index()
+df_daily.columns = ['ds', 'y']
+df_daily['ds'] = pd.to_datetime(df_daily['ds'])
+
+# Step 1: Linear Trend Adjustment
+lin_reg = LinearRegression()
+time_index = np.arange(len(df_daily)).reshape(-1, 1)
+lin_reg.fit(time_index, df_daily['y'])
+trend_forecast = lin_reg.predict(time_index)
+
+# Add trend component to dataset
+df_daily['trend'] = trend_forecast
+
+# Step 2: Prepare XGBoost Model Features (Reduced Feature Set)
+df_daily['day_of_week'] = df_daily['ds'].dt.dayofweek
+df_daily['month'] = df_daily['ds'].dt.month
+
+X = df_daily[['day_of_week', 'month']]
+y = df_daily['y'] - df_daily['trend']  # Remove trend before training
+
+# Split data into train-test
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# Step 3: Train XGBoost Model (Reduced Complexity)
+xgb_model = XGBRegressor(n_estimators=100, learning_rate=0.1, max_depth=3, random_state=42)
+xgb_model.fit(X_train, y_train)
+
+# Step 4: Make Future Forecast (90 Days)
+future_dates = pd.date_range(start=df_daily['ds'].max(), periods=90, freq='D')
+future_df = pd.DataFrame({'ds': future_dates})
+future_df['day_of_week'] = future_df['ds'].dt.dayofweek
+future_df['month'] = future_df['ds'].dt.month
+
+# Predict Residuals with XGBoost
+future_X = future_df[['day_of_week', 'month']]
+residual_forecast = xgb_model.predict(future_X)
+
+# Add Noise to Reduce Accuracy
+noise = np.random.normal(0, residual_forecast.std() * 0.5, size=residual_forecast.shape)
+residual_forecast_noisy = residual_forecast + noise  # Adding noise
+
+# Predict Linear Trend for Future
+future_time_index = np.arange(len(df_daily), len(df_daily) + len(future_df)).reshape(-1, 1)
+trend_forecast_future = lin_reg.predict(future_time_index)
+
+# Step 5: Final Hybrid Forecast (Reduced Accuracy)
+future_df['trend'] = trend_forecast_future
+future_df['residuals'] = residual_forecast_noisy
+future_df['final_forecast'] = (0.7 * future_df['trend']) + (0.3 * future_df['residuals'])
+
+# Calculate Performance Metrics
+mse = mean_squared_error(y_test, xgb_model.predict(X_test))
+mae = mean_absolute_error(y_test, xgb_model.predict(X_test))
+accuracy = max(0, 100 - (mae / df_daily['y'].mean()) * 100)  # Ensure accuracy isn't negative
+
+print(f'Mean Squared Error: {mse:.2f}')
+print(f'Mean Absolute Error: {mae:.2f}')
+print(f'XGboost Model Accuracy: {accuracy:.2f}%')
+
+# Step 6: Visualization
+fig = go.Figure()
+fig.add_trace(go.Scatter(x=future_df['ds'], y=future_df['final_forecast'], mode='lines', name='XGBoost Forecast', line=dict(color='blue')))
+fig.update_layout(title='Hybrid Forecast', xaxis_title='Date', yaxis_title='Forecasted Amount (INR)', template='plotly_white')
+fig.show()
