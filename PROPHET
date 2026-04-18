@@ -1,0 +1,104 @@
+import pandas as pd
+from prophet import Prophet
+import plotly.graph_objects as go
+from sklearn.metrics import mean_squared_error, mean_absolute_error
+import numpy as np
+import matplotlib.pyplot as plt
+import plotly.express as px
+
+# Load dataset
+file_path = "hd.csv"
+df = pd.read_csv(file_path)
+
+# Convert timestamp to datetime format
+df['Timestamp'] = pd.to_datetime(df['Timestamp'])
+
+# Aggregate daily amount
+df_daily = df.groupby(df['Timestamp'].dt.date)['Amount (INR)'].sum().reset_index()
+df_daily.rename(columns={'Timestamp': 'ds', 'Amount (INR)': 'y'}, inplace=True)
+
+# Ensure 'ds' column is in datetime format
+df_daily['ds'] = pd.to_datetime(df_daily['ds'])
+
+# Introduce an upward trend by setting a logistic growth cap
+df_daily['cap'] = df_daily['y'].max() * 1.5  # Set carrying capacity
+
+# Initialize Prophet model with logistic growth and higher changepoint flexibility
+model = Prophet(growth='logistic', changepoint_prior_scale=0.2)
+model.fit(df_daily)
+
+# Create future dataframe for the next 3 months
+future = model.make_future_dataframe(periods=90)
+future['cap'] = df_daily['cap'].max()
+
+
+# Make predictions
+forecast = model.predict(future)
+
+# Merge actual and predicted values for evaluation
+df_merged = df_daily.merge(forecast[['ds', 'yhat']], on='ds', how='inner')
+
+# Calculate error metrics
+mse = mean_squared_error(df_merged['y'], df_merged['yhat'])
+mae = mean_absolute_error(df_merged['y'], df_merged['yhat'])
+accuracy = 100 - (np.mean(np.abs((df_merged['y'] - df_merged['yhat']) / df_merged['y'])) * 100)
+
+# Print error metrics
+print(f'MSE: {mse:.2f}')
+print(f'MAE: {mae:.2f}')
+print(f'Accuracy: {accuracy:.2f}%')
+
+# Create interactive plot using Plotly
+fig = go.Figure()
+fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat'], mode='lines', name='Forecast', line=dict(color='blue')))
+fig.update_layout(title='Prophet Forecast', xaxis_title='Date', yaxis_title='Amount (INR)')
+fig.show()
+
+# Aggregate total transaction amount by platform
+platform_totals = df.groupby("Platform")["Amount (INR)"].sum()
+
+# Plot the bar chart
+plt.figure(figsize=(10, 5))
+platform_totals.sort_values(ascending=False).plot(kind="bar", color='green')
+plt.title("Total Transaction Amount by Platform")
+plt.xlabel("Payment Platform")
+plt.ylabel("Total Amount (INR)")
+plt.xticks(rotation=45)
+plt.grid(axis="y", linestyle="--", alpha=0.7)
+plt.show()
+
+# Aggregate total transaction amount by category
+category_totals = df.groupby("Category")["Amount (INR)"].sum().reset_index()
+
+# Find the most sold item in each category
+most_sold_items = df.groupby(["Category", "Item"]).size().reset_index(name="Count")
+most_sold_items = most_sold_items.loc[most_sold_items.groupby("Category")["Count"].idxmax()]
+
+# Merge with category totals
+category_totals = category_totals.merge(most_sold_items[["Category", "Item"]], on="Category", how="left")
+
+# Create interactive bar chart
+fig = px.bar(
+    category_totals,
+    x="Category",
+    y="Amount (INR)",
+    title="Total Sales Amount by Category",
+    labels={"Amount (INR)": "Total Amount (INR)", "Category": "Category"},
+    text="Item",  # Show most sold item as text on bars
+    hover_data={"Item": True}  # Show most sold item on hover
+)
+
+fig.update_traces(marker_color="#ff7f0e", textposition="inside")
+fig.update_layout(xaxis_tickangle=-45, uniformtext_minsize=10, uniformtext_mode='hide')
+fig.show()
+
+# Create an interactive pie chart
+fig = px.pie(
+    category_totals,
+    names="Category",
+    values="Amount (INR)",
+    title="Sales Distribution by Category",
+    hover_data={"Amount (INR)": ":,.2f"},
+    hole=0.3  # Creates a donut-style pie chart
+)
+fig.show()
