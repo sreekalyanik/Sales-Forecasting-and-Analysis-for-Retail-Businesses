@@ -1,0 +1,27 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+def analyze_customer(name, file_path):
+    # Load the dataset
+    df = pd.read_csv(file_path)
+    
+    # Filter data for the specific customer
+    customer_data = df[df['Customer Name'].str.lower() == name.lower()]
+    
+    if customer_data.empty:
+        print("No data found for the given customer name.")
+        return
+    
+    # Plot spending by category
+    plt.figure(figsize=(10, 5))
+    sns.barplot(x=customer_data['Category'], y=customer_data['Amount (INR)'], errorbar=None)
+    plt.xlabel("Category")
+    plt.ylabel("Amount Spent (INR)")
+    plt.title(f"Spending Analysis for {name}")
+    plt.xticks(rotation=45)
+    plt.show()
+
+file_path = "hd1.csv"
+customer_name = input("Enter customer name: ")
+analyze_customer(customer_name, file_path)
