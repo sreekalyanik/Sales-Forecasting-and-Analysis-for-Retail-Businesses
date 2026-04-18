@@ -1,0 +1,64 @@
+import pandas as pd
+import plotly.graph_objects as go
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+from sklearn.metrics import mean_squared_error, mean_absolute_error
+import numpy as np
+
+# Load dataset
+file_path = "newdata.csv"
+df = pd.read_csv(file_path)
+
+# Convert Timestamp to datetime and set it as index
+df['Timestamp'] = pd.to_datetime(df['Timestamp'])
+df.set_index('Timestamp', inplace=True)
+
+# Aggregate transaction amounts per day
+df_daily = df.resample('D')['Amount (INR)'].sum()
+
+# Filter data from November onwards
+df_daily = df_daily[df_daily.index >= '2024-11-01']
+
+# Split data into train and test sets
+train_size = int(len(df_daily) * 0.8)
+train, test = df_daily[:train_size], df_daily[train_size:]
+
+# Fit SARIMAX model
+model = SARIMAX(train, order=(1,1,1), seasonal_order=(1,1,1,7),
+                 enforce_stationarity=False, enforce_invertibility=False)
+results = model.fit()
+
+# Forecast on test set
+forecast = results.get_forecast(steps=len(test))
+test_forecast = forecast.predicted_mean
+
+# Calculate evaluation metrics
+mse = mean_squared_error(test, test_forecast)
+mae = mean_absolute_error(test, test_forecast)
+accuracy = 100 - (np.mean(np.abs((test - test_forecast) / test)) * 100)
+
+# Print evaluation metrics
+print(f"Mean Squared Error (MSE): {mse}")
+print(f"Mean Absolute Error (MAE): {mae}")
+print(f"Accuracy: {accuracy:.2f}%")
+
+# Forecast the next 30 days
+forecast_steps = 30
+final_forecast = results.get_forecast(steps=forecast_steps)
+forecast_index = pd.date_range(start=df_daily.index[-1] + pd.Timedelta(days=1), periods=forecast_steps, freq='D')
+forecast_values = final_forecast.predicted_mean
+
+# Combine observed and forecasted data
+full_index = df_daily.index.append(forecast_index)
+full_values = pd.concat([df_daily, forecast_values])
+
+# Create interactive plot for observed and forecasted data
+fig = go.Figure()
+fig.add_trace(go.Scatter(x=full_index, y=full_values, mode='lines', name='Observed & Forecasted Transactions', line=dict(color='blue')))
+
+fig.update_layout(title='Observed and Forecasted Transactions using SARIMAX',
+                  xaxis_title='Date',
+                  yaxis_title='Amount (INR)',
+                  xaxis=dict(tickformat='%b %Y', tickmode='array', dtick='M1', tickvals=pd.date_range(start=df_daily.index.min(), end=forecast_index.max(), freq='MS')), # Show only once per month
+                  hovermode='x unified')
+
+fig.show()
