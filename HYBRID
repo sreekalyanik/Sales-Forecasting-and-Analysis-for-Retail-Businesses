@@ -1,0 +1,205 @@
+import pandas as pd
+import numpy as np
+from prophet import Prophet
+import xgboost as xgb
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import mean_squared_error, mean_absolute_error
+import plotly.graph_objects as go
+import matplotlib.pyplot as plt
+from xgboost import XGBRegressor
+import plotly.express as px
+
+# Load dataset
+file_path = "hd1.csv"
+df = pd.read_csv(file_path)
+
+# Ensure 'Timestamp' is present
+if 'Timestamp' not in df.columns:
+    raise ValueError("The column 'Timestamp' is missing from the dataset.")
+
+# Convert Timestamp to datetime
+df['Timestamp'] = pd.to_datetime(df['Timestamp'])
+
+# Aggregate daily sum of Amount (INR)
+df_daily = df.groupby(df['Timestamp'].dt.date)['Amount (INR)'].sum().reset_index()
+df_daily.columns = ['ds', 'y']
+df_daily['ds'] = pd.to_datetime(df_daily['ds'])
+
+# Step 1: Fit Prophet Model
+prophet = Prophet(growth="linear", changepoint_prior_scale=0.05)
+prophet.fit(df_daily)
+
+# Make future dataframe for 90 days
+future = prophet.make_future_dataframe(periods=90)
+forecast = prophet.predict(future)
+
+# Ensure 'yhat' exists
+if 'yhat' not in forecast.columns:
+    raise ValueError("Error: Prophet did not generate 'yhat' column.")
+
+# Step 2: Calculate Residuals
+df_daily = df_daily.merge(forecast[['ds', 'yhat']], on='ds', how='left')
+df_daily['residuals'] = df_daily['y'] - df_daily['yhat']
+
+# Step 3: Train XGBoost Model on Residuals
+df_daily['month'] = df_daily['ds'].dt.month
+df_daily['dayofweek'] = df_daily['ds'].dt.dayofweek
+df_daily['time_index'] = range(len(df_daily))  # Time-based feature
+
+X = df_daily[['month', 'dayofweek', 'time_index']]
+y = df_daily['residuals']
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+xgb_model = xgb.XGBRegressor(objective='reg:squarederror', n_estimators=100)
+xgb_model.fit(X_train, y_train)
+
+# Step 4: Forecast Residuals using XGBoost
+future['month'] = future['ds'].dt.month
+future['dayofweek'] = future['ds'].dt.dayofweek
+future['time_index'] = range(len(df_daily), len(df_daily) + len(future))
+future_X = future[['month', 'dayofweek', 'time_index']]
+residual_forecast = xgb_model.predict(future_X)
+
+# Step 5: Linear Trend Adjustment
+lin_reg = LinearRegression()
+time_index = np.arange(len(df_daily)).reshape(-1, 1)
+lin_reg.fit(time_index, df_daily['y'])
+future_time_index = np.arange(len(df_daily), len(df_daily) + len(future)).reshape(-1, 1)
+trend_forecast = lin_reg.predict(future_time_index)
+
+# Step 6: Combine Prophet, XGBoost Residuals, and Linear Trend
+final_forecast = forecast[['ds', 'yhat']].copy()
+final_forecast['trend'] = trend_forecast
+final_forecast['residuals'] = residual_forecast
+final_forecast['yhat_corrected'] = final_forecast['yhat'] + final_forecast['residuals'] + final_forecast['trend']
+
+# Fix: Define data before using it
+data = df.copy()
+data.set_index('Timestamp', inplace=True)
+
+# Aggregate daily data
+daily_data = data['Amount (INR)'].resample('D').sum().reset_index()
+daily_data.columns = ['ds', 'y']
+
+# Add time-based features
+daily_data['day_of_week'] = daily_data['ds'].dt.dayofweek
+daily_data['week_of_year'] = daily_data['ds'].dt.isocalendar().week.astype(int)
+daily_data['month'] = daily_data['ds'].dt.month
+daily_data['year'] = daily_data['ds'].dt.year
+
+# Initialize Prophet model with optimized parameters
+model = Prophet(daily_seasonality=True, yearly_seasonality=True, weekly_seasonality=True, changepoint_prior_scale=0.1)
+model.fit(daily_data)
+
+# Create future dataframe
+future = model.make_future_dataframe(periods=90)
+
+# Add time-based features to future data
+future['day_of_week'] = future['ds'].dt.dayofweek
+future['week_of_year'] = future['ds'].dt.isocalendar().week.astype(int)
+future['month'] = future['ds'].dt.month
+future['year'] = future['ds'].dt.year
+future.fillna(method='ffill', inplace=True)
+
+# Predict using Prophet
+forecast = model.predict(future)
+
+# Prepare dataset for XGBoost
+daily_data['prophet_pred'] = forecast['yhat'][:len(daily_data)]  
+X = daily_data[['day_of_week', 'week_of_year', 'month', 'year', 'prophet_pred']]
+y = daily_data['y']
+
+# Split data into train-test
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# Train XGBoost model
+xgb_model = XGBRegressor(n_estimators=500, learning_rate=0.05, max_depth=5, random_state=42)
+xgb_model.fit(X_train, y_train)
+
+# Make XGBoost predictions
+daily_data['xgb_pred'] = xgb_model.predict(X)
+
+# Blend Prophet & XGBoost predictions
+daily_data['hybrid_pred'] = (daily_data['prophet_pred'] * 0.5) + (daily_data['xgb_pred'] * 0.5)
+
+# Calculate performance metrics
+mse = mean_squared_error(daily_data['y'], daily_data['hybrid_pred'])
+mae = mean_absolute_error(daily_data['y'], daily_data['hybrid_pred'])
+
+# Accuracy Calculation
+mse_percentage = min((mse / daily_data['y'].mean()) * 100, 100)
+mae_percentage = (mae / daily_data['y'].mean()) * 100
+accuracy = 100 - mae_percentage
+
+# Output the performance metrics
+print(f'Mean Squared Error: {mse:.2f} ({mse_percentage:.2f}%)')
+print(f'Mean Absolute Error: {mae:.2f} ({mae_percentage:.2f}%)')
+print(f'Hybrid Model Accuracy: {accuracy:.2f}%')
+
+
+
+# Create interactive plot using Plotly
+fig = go.Figure()
+fig.add_trace(go.Scatter(x=final_forecast['ds'], y=final_forecast['yhat_corrected'], mode='lines', name='Hybrid Forecast', line=dict(color='blue')))
+fig.update_layout(title='Hybrid Model Forecast', xaxis_title='Date', yaxis_title='Forecasted Amount (INR)', template='plotly_white')
+fig.show()
+
+# Aggregate total transaction amount by platform
+platform_totals = df.groupby("Platform")["Amount (INR)"].sum()
+
+# Plot the bar chart
+plt.figure(figsize=(10, 6))
+platform_totals.sort_values(ascending=False).plot(kind="bar",color='skyblue')
+plt.title("Total Transaction Amount by Platform")
+plt.xlabel("Payment Platform")
+plt.ylabel("Total Amount (INR)")
+plt.xticks(rotation=45)
+plt.grid(axis="y", alpha=0.7)
+plt.show()
+
+# Aggregate total transaction amount by category
+
+category_totals = df.groupby("Category")["Amount (INR)"].sum().reset_index()
+
+# Find the most sold item in each category
+most_sold_items = df.groupby(["Category", "Item"]).size().reset_index(name="Count")
+most_sold_items = most_sold_items.loc[most_sold_items.groupby("Category")["Count"].idxmax()]
+
+# Merge with category totals
+category_totals = category_totals.merge(most_sold_items[["Category", "Item"]], on="Category", how="left")
+
+# Create interactive bar chart
+fig = px.bar(
+    category_totals,
+    x="Category",
+    y="Amount (INR)",
+    title="Total Sales Amount by Category",
+    labels={"Amount (INR)": "Total Amount (INR)", "Category": "Category"},
+    text="Item",  # Show most sold item as text on bars
+    hover_data={"Item": True}  # Show most sold item on hover
+)
+
+# Adjust text position and layout for better readability
+fig.update_traces(marker_color="pink", textposition="inside")  # Inside bars for better visibility
+fig.update_layout(
+    xaxis_tickangle=-45,  # Rotate labels
+    uniformtext_minsize=9,  # Ensure text size is readable
+    uniformtext_mode='hide'  # Hide overlapping text instead of cutting it off
+)
+
+# Show the interactive chart
+fig.show()
+
+# Create an interactive pie chart
+fig = px.pie(
+    category_totals,
+    names="Category",
+    values="Amount (INR)",
+    title="Sales Distribution by Category",
+    hover_data={"Amount (INR)": ":,.2f"},  # Show formatted sales amount on hover
+    hole=0.3  # Creates a donut-style pie chart
+)
+
+# Show the interactive chart
+fig.show()
