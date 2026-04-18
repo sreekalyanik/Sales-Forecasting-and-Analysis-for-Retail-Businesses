@@ -1,0 +1,85 @@
+import pandas as pd
+import numpy as np
+import lightgbm as lgb
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error, mean_absolute_error
+import plotly.graph_objects as go
+
+# Load dataset
+file_path = "newdata3.csv"
+df = pd.read_csv(file_path)
+
+# Ensure 'Timestamp' is present
+if 'Timestamp' not in df.columns:
+    raise ValueError("The column 'Timestamp' is missing from the dataset.")
+
+# Convert Timestamp to datetime
+df['Timestamp'] = pd.to_datetime(df['Timestamp'])
+
+# Aggregate daily sum of Amount (INR)
+df_daily = df.groupby(df['Timestamp'].dt.date)['Amount (INR)'].sum().reset_index()
+df_daily.columns = ['ds', 'y']
+df_daily['ds'] = pd.to_datetime(df_daily['ds'])
+
+# Prepare features for LightGBM
+df_daily['month'] = df_daily['ds'].dt.month.astype(int)
+df_daily['dayofweek'] = df_daily['ds'].dt.dayofweek.astype(int)
+df_daily['time_index'] = np.arange(len(df_daily))
+
+X = df_daily[['month', 'dayofweek', 'time_index']]
+y = df_daily['y']
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+lgb_train = lgb.Dataset(X_train, label=y_train)
+lgb_test = lgb.Dataset(X_test, label=y_test)
+
+params = {
+    'objective': 'regression',
+    'metric': 'mse',
+    'boosting_type': 'gbdt',
+    'learning_rate': 0.05,
+    'num_leaves': 31,
+    'verbose': -1  # Suppresses LightGBM logs
+}
+
+# Train the LightGBM model
+lgb_model = lgb.train(
+    params, 
+    lgb_train, 
+    valid_sets=[lgb_test], 
+    num_boost_round=100
+)
+
+# Forecast using LightGBM
+future = pd.DataFrame({
+    'ds': pd.date_range(start=df_daily['ds'].max() + pd.Timedelta(days=1), periods=90, freq='D')
+})
+future['month'] = future['ds'].dt.month.astype(int)
+future['dayofweek'] = future['ds'].dt.dayofweek.astype(int)
+future['time_index'] = np.arange(len(df_daily), len(df_daily) + len(future))
+future_X = future[['month', 'dayofweek', 'time_index']]
+forecasted_values = lgb_model.predict(future_X)
+
+# Create DataFrame for plotting
+lgb_forecast = pd.DataFrame({'ds': future['ds'], 'yhat': forecasted_values})
+
+# Analysis of past performance
+past_forecast = lgb_model.predict(X)
+df_daily['yhat'] = past_forecast
+
+# Calculate Performance Metrics
+mse = mean_squared_error(y_test, lgb_model.predict(X_test))
+mae = mean_absolute_error(y_test, lgb_model.predict(X_test))
+accuracy = 100 - ((mae / y_test.mean()) * 100)
+
+print(f'MSE: {mse:.2f}')
+print(f'MAE: {mae:.2f}')
+print(f'Accuracy: {accuracy:.2f}%')
+
+# Plot LightGBM Forecast
+fig = go.Figure()
+fig.add_trace(go.Scatter(x=df_daily['ds'], y=df_daily['y'], mode='lines', name='Actual Data', line=dict(color='black')))
+fig.add_trace(go.Scatter(x=df_daily['ds'], y=df_daily['yhat'], mode='lines', name='Past Predictions', line=dict(color='red')))
+fig.add_trace(go.Scatter(x=lgb_forecast['ds'], y=lgb_forecast['yhat'], mode='lines', name='Future Forecast', line=dict(color='blue')))
+fig.update_layout(title='LightGBM Forecast with Past Analysis', xaxis_title='Date', yaxis_title='Amount (INR)', template='plotly_white')
+fig.show()
